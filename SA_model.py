@@ -1,6 +1,13 @@
+"""
+Rodolphe Nonclercq
+rnonclercq@gmail.com
+"""
+
 import torch
 import torch.nn as nn
 import numpy as np
+
+# Inspired by https://github.com/evelinehong/slot-attention-pytorch
 
 def build_grid(resolution):
     ranges = [np.linspace(0., 1., num=res) for res in resolution]
@@ -216,7 +223,7 @@ class SlotAttentionAutoEncoder(nn.Module):
 
         return recons,masks,slots
 
-class SlotVariationalAttentionAutoEncoder(SlotAttentionAutoEncoder):
+class SlotAttentionVariationalAutoEncoder(SlotAttentionAutoEncoder):
     def __init__(self, resolution, num_slots, num_iterations, hid_dim):
         """Builds the Slot Attention-based auto-encoder.
         Args:
@@ -288,3 +295,48 @@ class SlotVariationalAttentionAutoEncoder(SlotAttentionAutoEncoder):
 
         return recons,masks,slots,mu,log_sigma
 
+class SlotAttentionVideoAutoEncoder(SlotAttentionAutoEncoder):
+    def __init__(self, resolution, num_slots, num_iterations, hid_dim):
+        """Builds the Slot Attention-based auto-encoder.
+        Args:
+        resolution: Tuple of integers specifying width and height of input image.
+        num_slots: Number of slots in Slot Attention.
+        num_iterations: Number of iterations in Slot Attention.
+        """
+        super().__init__(resolution, num_slots, num_iterations, hid_dim)
+
+        self.predictor = nn.Transformer(hid_dim,nhead=4,dim_feedforward=hid_dim*2,batch_first=True)
+
+    def forward(self,image,init_slots):
+        if len(image.shape) == 4 :
+            k,v = self.encoding(image)
+            # Slot Attention module.
+            slots = self.slots_attention(init_slots,k,v)
+            # `slots` has shape: [batch_size, num_slots, slot_size].
+
+            # """Broadcast slot features to a 2D grid and collapse slot dimension.""".
+            recons,masks = self.decoding(slots)
+            # `recons` has shape: [batch_size, num_slots, num_channels , width, height].
+            # `masks` has shape: [batch_size, num_slots, 1, width, height].
+
+            return recons,masks,slots
+        
+        elif len(image.shape) == 5 :
+            b,f,c,h,w = image.shape
+            k,v = self.encoding(image.reshape(-1,c,h,w))
+            k,v = k.reshape(b,f,k.shape[1],k.shape[2]),v.reshape(b,f,v.shape[1],v.shape[2])
+
+            list_slots = []
+            for i in range(f):
+                list_slots.append(self.slots_attention(init_slots,k[:,i],v[:,i]))
+                init_slots = list_slots[-1] + self.predictor(list_slots[-1],list_slots[-1])
+            
+            slots = torch.stack(list_slots,dim=1)
+
+            recons,masks = self.decoding(slots.reshape(-1,slots.shape[-2],slots.shape[-1]))
+            recons = recons.reshape(b,f,recons.shape[-4],recons.shape[-3],recons.shape[-2],recons.shape[-1])
+            masks = masks.reshape(b,f,masks.shape[-4],masks.shape[-3],masks.shape[-2],masks.shape[-1])
+
+            return recons,masks,slots
+
+        
